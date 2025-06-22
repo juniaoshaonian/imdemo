@@ -112,6 +112,15 @@ func main() {
 		log.Fatalf("无效的测试持续时间: %v", *testDuration)
 	}
 
+	// 计算实际负载
+	totalLoad := *numClients * *messagesPerSecond
+	log.Printf("负载配置 - 客户端数: %d, 每客户端每秒消息: %d, 总负载: %d 消息/秒",
+		*numClients, *messagesPerSecond, totalLoad)
+
+	if totalLoad > 10000 {
+		log.Printf("⚠️  警告: 总负载 %d 消息/秒 可能过高，建议降低客户端数量或消息频率", totalLoad)
+	}
+
 	var wg sync.WaitGroup
 	metrics := &PerformanceMetrics{}
 	metrics.StartTime = time.Now()

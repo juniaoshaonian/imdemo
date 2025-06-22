@@ -3,9 +3,17 @@ package main
 import (
 	"log"
 	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+)
+
+var (
+	activeConnections int64
+	totalMessages     int64
+	startTime         = time.Now()
 )
 
 func main() {
@@ -15,6 +23,9 @@ func main() {
 	}
 	defer ln.Close()
 	log.Println("WebSocket服务端启动 :50051")
+
+	// 启动统计监控
+	go monitorStats()
 
 	for {
 		conn, err := ln.Accept()
@@ -28,7 +39,11 @@ func main() {
 }
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+	atomic.AddInt64(&activeConnections, 1)
+	defer func() {
+		atomic.AddInt64(&activeConnections, -1)
+		conn.Close()
+	}()
 
 	// 升级为WebSocket连接
 	_, err := ws.Upgrade(conn)
@@ -39,17 +54,37 @@ func handleConnection(conn net.Conn) {
 
 	for {
 		// 读取客户端消息
-		msg, op, err := wsutil.ReadClientData(conn)
+		_, op, err := wsutil.ReadClientData(conn)
 		if err != nil {
-			log.Printf("读取失败: %v", err)
+			// 只在非正常关闭时打印错误
+			if err.Error() != "EOF" {
+				log.Printf("读取失败: %v", err)
+			}
 			return
 		}
-		log.Printf("收到消息: %s", msg)
 
-		// 返回 "OK" 响应
+		// 增加消息计数
+		atomic.AddInt64(&totalMessages, 1)
+
+		// 返回响应（移除日志打印以提高性能）
 		if err := wsutil.WriteServerMessage(conn, op, []byte("OK")); err != nil {
 			log.Printf("发送失败: %v", err)
 			return
 		}
+	}
+}
+
+func monitorStats() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		active := atomic.LoadInt64(&activeConnections)
+		total := atomic.LoadInt64(&totalMessages)
+		duration := time.Since(startTime).Seconds()
+		throughput := float64(total) / duration
+
+		log.Printf("统计 - 活跃连接: %d, 总消息: %d, 吞吐量: %.2f 消息/秒",
+			active, total, throughput)
 	}
 }
