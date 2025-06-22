@@ -103,8 +103,8 @@ func main() {
 					responseTime := time.Since(startTime)
 					atomic.AddInt64(&globalTotalCount, 1)
 
-					// 检查是否超过500ms
-					if responseTime > 500*time.Millisecond {
+					// 检查是否超过1s
+					if responseTime > 1000*time.Millisecond {
 						atomic.AddInt64(&globalTimeoutCount, 1)
 						log.Printf("[%d] 响应超时: %v, 响应: %s", id, responseTime, res)
 					} else {
