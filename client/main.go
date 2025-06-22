@@ -17,20 +17,39 @@ import (
 )
 
 type PerformanceMetrics struct {
-	TotalMessages    int64
-	TimeoutMessages  int64
-	ErrorMessages    int64
-	ConnectionErrors int64
-	SendErrors       int64
-	ReceiveErrors    int64
-	ResponseTimes    []time.Duration
-	mu               sync.RWMutex
+	// 消息相关指标
+	TotalMessages   int64
+	TimeoutMessages int64
+	ErrorMessages   int64
+	SendErrors      int64
+	ReceiveErrors   int64
+
+	// 连接相关指标
+	ConnectionAttempts    int64
+	SuccessfulConnections int64
+	ConnectionErrors      int64
+	ConnectionTimes       []time.Duration
+
+	// 响应时间指标
+	ResponseTimes []time.Duration
+
+	// 吞吐量指标
+	StartTime time.Time
+	EndTime   time.Time
+
+	mu sync.RWMutex
 }
 
 func (pm *PerformanceMetrics) AddResponseTime(duration time.Duration) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.ResponseTimes = append(pm.ResponseTimes, duration)
+}
+
+func (pm *PerformanceMetrics) AddConnectionTime(duration time.Duration) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.ConnectionTimes = append(pm.ConnectionTimes, duration)
 }
 
 func (pm *PerformanceMetrics) GetPercentile(percentile float64) time.Duration {
@@ -44,6 +63,25 @@ func (pm *PerformanceMetrics) GetPercentile(percentile float64) time.Duration {
 	// 复制并排序
 	times := make([]time.Duration, len(pm.ResponseTimes))
 	copy(times, pm.ResponseTimes)
+	sort.Slice(times, func(i, j int) bool {
+		return times[i] < times[j]
+	})
+
+	index := int(float64(len(times)-1) * percentile / 100)
+	return times[index]
+}
+
+func (pm *PerformanceMetrics) GetConnectionTimePercentile(percentile float64) time.Duration {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if len(pm.ConnectionTimes) == 0 {
+		return 0
+	}
+
+	// 复制并排序
+	times := make([]time.Duration, len(pm.ConnectionTimes))
+	copy(times, pm.ConnectionTimes)
 	sort.Slice(times, func(i, j int) bool {
 		return times[i] < times[j]
 	})
@@ -76,6 +114,7 @@ func main() {
 
 	var wg sync.WaitGroup
 	metrics := &PerformanceMetrics{}
+	metrics.StartTime = time.Now()
 	u := url.URL{Scheme: "ws", Host: *serverURL, Path: "/ws"}
 
 	// 创建上下文，设置测试持续时间
@@ -101,12 +140,14 @@ func main() {
 				total := atomic.LoadInt64(&metrics.TotalMessages)
 				timeouts := atomic.LoadInt64(&metrics.TimeoutMessages)
 				errors := atomic.LoadInt64(&metrics.ErrorMessages)
-				connErrors := atomic.LoadInt64(&metrics.ConnectionErrors)
+				connAttempts := atomic.LoadInt64(&metrics.ConnectionAttempts)
+				successfulConns := atomic.LoadInt64(&metrics.SuccessfulConnections)
 
 				if total > 0 {
-					log.Printf("实时统计 - 总消息: %d, 超时: %d (%.2f%%), 错误: %d (%.2f%%), 连接错误: %d",
+					log.Printf("实时统计 - 总消息: %d, 超时: %d (%.2f%%), 错误: %d (%.2f%%), 连接成功率: %.2f%% (%d/%d)",
 						total, timeouts, float64(timeouts)/float64(total)*100,
-						errors, float64(errors)/float64(total)*100, connErrors)
+						errors, float64(errors)/float64(total)*100,
+						float64(successfulConns)/float64(connAttempts)*100, successfulConns, connAttempts)
 				}
 			}
 		}
@@ -124,16 +165,29 @@ func main() {
 			// 延迟建立连接，实现连接建立阶段
 			time.Sleep(connectionInterval * time.Duration(id))
 
+			// 记录连接尝试
+			atomic.AddInt64(&metrics.ConnectionAttempts, 1)
+
+			// 记录连接开始时间
+			connStartTime := time.Now()
+
 			// 建立 WebSocket 连接
 			connCtx, connCancel := context.WithTimeout(context.Background(), *connectionTimeout)
 			conn, _, _, err := ws.Dial(connCtx, u.String())
 			connCancel()
 
+			// 记录连接时间
+			connTime := time.Since(connStartTime)
+			metrics.AddConnectionTime(connTime)
+
 			if err != nil {
 				atomic.AddInt64(&metrics.ConnectionErrors, 1)
-				log.Printf("[%d] 连接失败: %v", id, err)
+				log.Printf("[%d] 连接失败: %v (耗时: %v)", id, err, connTime)
 				return
 			}
+
+			// 记录成功连接
+			atomic.AddInt64(&metrics.SuccessfulConnections, 1)
 			defer conn.Close()
 
 			// 计算消息间隔时间
@@ -217,21 +271,35 @@ func main() {
 }
 
 func generateReport(metrics *PerformanceMetrics, numClients, mps int, duration time.Duration, msgSize int, serverURL string) {
+	metrics.EndTime = time.Now()
+
 	total := atomic.LoadInt64(&metrics.TotalMessages)
 	timeouts := atomic.LoadInt64(&metrics.TimeoutMessages)
 	errors := atomic.LoadInt64(&metrics.ErrorMessages)
 	connErrors := atomic.LoadInt64(&metrics.ConnectionErrors)
 	sendErrors := atomic.LoadInt64(&metrics.SendErrors)
 	receiveErrors := atomic.LoadInt64(&metrics.ReceiveErrors)
+	connAttempts := atomic.LoadInt64(&metrics.ConnectionAttempts)
+	successfulConns := atomic.LoadInt64(&metrics.SuccessfulConnections)
 
-	// 计算吞吐量
-	throughput := float64(total) / duration.Seconds()
+	// 计算关键指标
+	actualDuration := metrics.EndTime.Sub(metrics.StartTime)
+	throughput := float64(total) / actualDuration.Seconds()
+	connectionSuccessRate := float64(successfulConns) / float64(connAttempts) * 100
+	messageSuccessRate := float64(total-errors) / float64(total) * 100
+	messageLossRate := float64(errors) / float64(total) * 100
 
 	// 计算响应时间统计
 	p50 := metrics.GetPercentile(50)
 	p90 := metrics.GetPercentile(90)
 	p95 := metrics.GetPercentile(95)
 	p99 := metrics.GetPercentile(99)
+
+	// 计算连接时间统计
+	connP50 := metrics.GetConnectionTimePercentile(50)
+	connP90 := metrics.GetConnectionTimePercentile(90)
+	connP95 := metrics.GetConnectionTimePercentile(95)
+	connP99 := metrics.GetConnectionTimePercentile(99)
 
 	// 生成报告
 	report := fmt.Sprintf(`WebSocket 压测报告
@@ -242,28 +310,43 @@ func generateReport(metrics *PerformanceMetrics, numClients, mps int, duration t
 - 每秒消息数: %d
 - 测试持续时间: %v
 - 消息大小: %d 字节
+- 实际测试时间: %v
 
-测试结果:
+连接指标:
+- 连接尝试数: %d
+- 成功连接数: %d
+- 连接失败数: %d
+- 连接成功率: %.2f%%
+- 连接时间 P50: %v
+- 连接时间 P90: %v
+- 连接时间 P95: %v
+- 连接时间 P99: %v
+
+消息处理指标:
 - 总消息数: %d
 - 成功消息数: %d
 - 超时消息数: %d (%.2f%%)
 - 错误消息数: %d (%.2f%%)
-- 连接错误数: %d
+- 消息成功率: %.2f%%
+- 消息丢失率: %.2f%%
 - 发送错误数: %d
 - 接收错误数: %d
 
 性能指标:
 - 吞吐量: %.2f 消息/秒
-- P50 响应时间: %v
-- P90 响应时间: %v
-- P95 响应时间: %v
-- P99 响应时间: %v
+- 响应时间 P50: %v
+- 响应时间 P90: %v
+- 响应时间 P95: %v
+- 响应时间 P99: %v
 
 测试时间: %s
 `,
-		serverURL, numClients, mps, duration, msgSize,
+		serverURL, numClients, mps, duration, msgSize, actualDuration,
+		connAttempts, successfulConns, connErrors, connectionSuccessRate,
+		connP50, connP90, connP95, connP99,
 		total, total-errors, timeouts, float64(timeouts)/float64(total)*100,
-		errors, float64(errors)/float64(total)*100, connErrors, sendErrors, receiveErrors,
+		errors, float64(errors)/float64(total)*100, messageSuccessRate, messageLossRate,
+		sendErrors, receiveErrors,
 		throughput, p50, p90, p95, p99,
 		time.Now().Format("2006-01-02 15:04:05"))
 
