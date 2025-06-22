@@ -25,7 +25,7 @@ func main() {
 		log.Fatalf("无效的每秒消息数量: %d (必须大于0)", *messagesPerSecond)
 	}
 	var wg sync.WaitGroup
-	u := url.URL{Scheme: "ws", Host: "172.17.0.14:50051", Path: "/ws"}
+	u := url.URL{Scheme: "ws", Host: "172.17.0.12:50051", Path: "/ws"}
 
 	for i := 0; i < *numClients; i++ {
 		wg.Add(1)
