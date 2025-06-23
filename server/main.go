@@ -18,7 +18,7 @@ const (
 	// 连接池配置
 	maxConnections = 10000
 	// 工作池配置
-	workerPoolSize = 100
+	workerPoolSize = 3000
 )
 
 var (
